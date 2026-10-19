@@ -9,10 +9,36 @@ All COM interaction is centralized here. Other modules use this bridge
 to obtain SapObject and SapModel references.
 """
 
+import sys
+
+# Crucial: On Windows, ensure thread is attached to interactive desktop BEFORE importing comtypes / COM init
+if sys.platform == "win32":
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        h_desk = user32.OpenDesktopW("default", 0, False, 0x01FF)
+        if h_desk:
+            user32.SetThreadDesktop(h_desk)
+    except Exception:
+        pass
+
 import comtypes.client
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def _ensure_default_desktop():
+    """Ensure the current thread is attached to the interactive 'default' desktop in Windows."""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            h_desk = user32.OpenDesktopW("default", 0, False, 0x01FF)
+            if h_desk:
+                user32.SetThreadDesktop(h_desk)
+        except Exception:
+            pass
 
 
 class SapBridge:
@@ -48,8 +74,13 @@ class SapBridge:
 
     def _create_helper(self):
         """Instantiate the SAP2000 COM helper once."""
+        _ensure_default_desktop()
         if self._helper is None:
-            self._helper = comtypes.client.CreateObject("SAP2000v1.Helper")
+            helper = comtypes.client.CreateObject("SAP2000v1.Helper")
+            try:
+                self._helper = helper.QueryInterface(comtypes.gen.SAP2000v1.cHelper)
+            except Exception:
+                self._helper = helper
 
     def connect(
         self,
@@ -83,9 +114,17 @@ class SapBridge:
 
         try:
             if attach_to_existing:
-                self._sap_object = self._helper.GetObject(
-                    "CSI.SAP2000.API.SapObject"
-                )
+                try:
+                    self._sap_object = self._helper.GetObject(
+                        "CSI.SAP2000.API.SapObject"
+                    )
+                except Exception:
+                    self._sap_object = None
+
+                if self._sap_object is None:
+                    self._sap_object = self._helper.CreateObjectProgID(
+                        "CSI.SAP2000.API.SapObject"
+                    )
                 logger.info("Attached to existing SAP2000 instance.")
             elif program_path:
                 self._sap_object = self._helper.CreateObject(program_path)
@@ -97,6 +136,9 @@ class SapBridge:
                 )
                 self._sap_object.ApplicationStart()
                 logger.info("Started latest installed SAP2000 via ProgID.")
+
+            if self._sap_object is None:
+                raise RuntimeError("Failed to obtain SapObject from SAP2000v1.Helper")
 
             self._sap_model = self._sap_object.SapModel
             return {"connected": True, **self._model_summary()}
