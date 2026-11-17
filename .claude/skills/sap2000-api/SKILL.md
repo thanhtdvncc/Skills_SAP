@@ -1,4 +1,4 @@
-﻿---
+---
 name: sap2000-api
 description: >-
   Referencia técnica para la API de SAP2000 via COM bridge: convención ByRef,
@@ -222,13 +222,52 @@ ModValue = [1000, 0, 0, 1, 1, 1, 1, 1]
 ret = SapModel.PropFrame.SetModifiers("R1", ModValue)
 ```
 
+## Conexión al Modelo Activo y Windows Desktop Isolation (CRÍTICO)
+
+En entornos de agentes IA o terminales virtuales en Windows, el proceso del agente puede ejecutarse en un Desktop aislado (ej. `exebox-...`), mientras que el usuario y SAP2000 están en el Desktop interactivo `WinSta0\default`.
+
+### Regla de Oro para Conexión COM:
+1. **Hook a `default` desktop ANTES de inicializar COM:**
+   En Windows, `CoInitialize` (ejecutado automáticamente al importar `comtypes.client`) asocia el hilo al Desktop actual. Para ver la Running Object Table (ROT) de SAP2000, se DEBE conmutar el hilo al escritorio `default` **antes** de `import comtypes.client`:
+   ```python
+   import sys
+   if sys.platform == "win32":
+       try:
+           import ctypes
+           user32 = ctypes.windll.user32
+           h_desk = user32.OpenDesktopW("default", 0, False, 0x01FF)
+           if h_desk:
+               user32.SetThreadDesktop(h_desk)
+       except Exception:
+           pass
+
+   import comtypes.client
+   ```
+
+2. **QueryInterface con `cHelper`:**
+   ```python
+   helper = comtypes.client.CreateObject("SAP2000v1.Helper")
+   helper = helper.QueryInterface(comtypes.gen.SAP2000v1.cHelper)
+   ```
+
+3. **Resolución de Instancia Activa (SAP2000 v24.1+ / v26+):**
+   - Primero intentar: `my_sap = helper.GetObject("CSI.SAP2000.API.SapObject")`
+   - Si retorna `None`, intentar por PID: `helper.GetObjectProcess("CSI.SAP2000.API.SapObject", pid)`
+   - Si aún retorna `None`, usar fallback: `helper.CreateObjectProgID("CSI.SAP2000.API.SapObject")` (se conecta al servidor local activo en Windows sin duplicar proceso).
+   - En SAP2000, el usuario puede fijar la instancia activa vía menú: `Tools -> Active API Instance (Process ID: ...)`.
+
+4. **Bloqueo por Diálogos Modales:**
+   - Si en SAP2000 hay un cuadro de diálogo modal abierto (ej. "Analysis Complete", o un menú desplegable abierto `WM_ENTERMENULOOP`), las llamadas COM entrantes se bloquean o retornan vacías. El diálogo modal debe cerrarse para permitir llamadas OAPI normales.
+
 ## Errores Comunes y Soluciones
 
 | Error | Causa | Solución |
 |-------|-------|----------|
+| `Model filename: None` (y SAP abierto) | Agente en desktop aislado de Windows | Conmutar hilo con `SetThreadDesktop` a `default` ANTES de importar `comtypes` |
+| `helper.GetObject(...) is None` | Instancia no registrada en ROT o diálogo modal abierto | Cerrar menú/diálogo modal en SAP2000, o usar `GetObjectProcess(pid)` / `CreateObjectProgID` |
 | `return_code != 0` | Parámetros inválidos o estado incorrecto | Verificar tipos y orden de params via wrapper o `search_api_docs` |
 | `AttributeError: 'NoneType'` | SapModel es None | Conexión perdida — llamar `connect_sap2000` |
-| `COMError` | Fallo de interfaz COM | SAP2000 pudo haber crasheado — reconectar |
+| `COMError` | Fallo de interfaz COM | SAP2000 pudo haber crasheado o integridad/UAC mismatch — reconectar |
 | `Module blocked` | Importando os, subprocess, etc. | Usar solo módulos permitidos (math, json, datetime, etc.) |
 | `Timeout after 120s` | Análisis tomando demasiado tiempo | Simplificar modelo o aumentar timeout |
 | `IndexError` | Layout ByRef incorrecto | Verificar wrapper: `raw[0]` vs `raw[-1]` |

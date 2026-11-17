@@ -7,8 +7,19 @@ and (in later steps) execute functions and scripts.
 Transport: stdio (launched by the MCP client).
 """
 
-import logging
 import sys
+
+if sys.platform == "win32":
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        h_desk = user32.OpenDesktopW("default", 0, False, 0x01FF)
+        if h_desk:
+            user32.SetThreadDesktop(h_desk)
+    except Exception:
+        pass
+
+import logging
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
